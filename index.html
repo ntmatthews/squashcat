@@ -9,7 +9,8 @@
   <meta name="author" content="Hyperforge Studios" />
   <meta name="theme-color" content="#111827" />
   <meta name="application-name" content="SquashCat" />
-  <link rel="icon" type="image/png" href="favicon.png" />
+  <!-- Inline SVG favicon (single-file) -->
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%23111827'/%3E%3Cpath fill='%23ffffff' d='M20 26l6-8 6 6 6-6 6 8v14a14 14 0 11-28 0V26z'/%3E%3Ccircle cx='27' cy='34' r='2' fill='%23111827'/%3E%3Ccircle cx='37' cy='34' r='2' fill='%23111827'/%3E%3Cpath d='M28 42h8' stroke='%23111827' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png" />
   <link rel="manifest" href="site.webmanifest" />
 
@@ -112,12 +113,16 @@
   </div>
 
 <script>
-// ForgeCat — Squash the Cats game code with inline comments for clarity
+// ForgeCat — Squash the Cats
+// Single-file game with inline comments explaining key systems (rendering, input, physics, collisions, audio, particles, day/night)
 
+/* ----------------------
+   Canvas + display setup
+   ---------------------- */
 const canvas = document.getElementById('game');
 const ctx = canvas.getContext('2d');
 
-// Basic dynamic metadata population
+// Populate a few runtime metadata fields (sessions, DPR) so panel shows meaningful data
 (function updateRuntimeMetadata(){
   const metaBestScore = document.getElementById('metaBestScore');
   const metaDPR = document.getElementById('metaDPR');
@@ -134,15 +139,16 @@ const ctx = canvas.getContext('2d');
 // Device Pixel Ratio for crisp rendering on high-DPI screens
 let DPR = Math.max(window.devicePixelRatio || 1, 1);
 
-// Resize canvas to match displayed size and DPR
+// Resize canvas to match displayed CSS size multiplied by DPR
 function resize() {
   const rect = canvas.getBoundingClientRect();
   canvas.width = Math.floor(rect.width * DPR);
   canvas.height = Math.floor(rect.height * DPR);
+  // Set transform so we can draw in CSS pixels
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
 }
 
-// Initialize canvas size based on window width with limits
+// Initialize canvas CSS size (keeps a consistent height with responsive width)
 function initCanvasSize() {
   const cssWidth = Math.min(900, Math.max(320, window.innerWidth * 0.9));
   canvas.style.width = cssWidth + 'px';
@@ -150,29 +156,26 @@ function initCanvasSize() {
   resize();
 }
 initCanvasSize();
+window.addEventListener('resize', () => { DPR = Math.max(window.devicePixelRatio || 1, 1); initCanvasSize(); });
 
-// Update canvas size on window resize
-window.addEventListener('resize', () => {
-  DPR = Math.max(window.devicePixelRatio || 1, 1);
-  initCanvasSize();
-});
+/* ----------------------
+   Game state & constants
+   ---------------------- */
+let running = false;         // true while the run is active
+let gameOver = false;        // true after a non-stomp collision
+let frames = 0;              // counted only while running (so freeze shows when gameOver)
+let score = 0;               // counts successful stomps only
+let baseSpeed = 2;          // slow base speed as requested
+let speed = baseSpeed;      // current speed (scales gently with score)
+let obstacles = [];         // active cats in the scene
+let clouds = [];            // decorative clouds
+let particles = [];         // stomp particle effects
+let spawnTimer = 0;         // timer until next spawn
 
-// Game state variables
-let running = false;
-let gameOver = false;
-let frames = 0;
-let score = 0;
-let baseSpeed = 2;
-let speed = baseSpeed;
-let obstacles = [];
-let clouds = [];
-let particles = [];
-let spawnTimer = 0;
-
-// Best score stored in localStorage, if any
+// Load best score from localStorage (if present)
 let best = JSON.parse(localStorage.getItem('forge_dino_best') || 'null');
 
-// DOM elements for updating UI
+// UI elements for updating status and score
 const bestBox = document.getElementById('bestBox');
 const scoreBox = document.getElementById('scoreBox');
 const status = document.getElementById('status');
@@ -184,474 +187,287 @@ function updateBestUI() {
 }
 updateBestUI();
 
-// Audio context for simple sound effects
-let audioCtx = null;
+/* ----------------------
+   Audio: small WebAudio effects
+   ---------------------- */
+let audioCtx = null; // created on first use to avoid autoplay policies issues until user interacts
 
 function ensureAudioCtx() {
   if (!audioCtx) {
-    try {
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-    } catch (e) {
-      audioCtx = null;
-    }
+    try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); }
+    catch (e) { audioCtx = null; }
   }
 }
 
+// Stomp sound: quick downward pitch sweep
 function playStompSound() {
-  ensureAudioCtx();
-  if (!audioCtx) return;
+  ensureAudioCtx(); if (!audioCtx) return;
   const t = audioCtx.currentTime;
-  const oscillator = audioCtx.createOscillator();
-  const gainNode = audioCtx.createGain();
-  oscillator.type = 'sine';
-  oscillator.frequency.setValueAtTime(180, t);
-  oscillator.frequency.exponentialRampToValueAtTime(80, t + 0.12);
-  gainNode.gain.setValueAtTime(0.0001, t);
-  gainNode.gain.exponentialRampToValueAtTime(0.18, t + 0.01);
-  gainNode.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
-  oscillator.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
-  oscillator.start(t);
-  oscillator.stop(t + 0.3);
+  const o = audioCtx.createOscillator();
+  const g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(180, t);
+  o.frequency.exponentialRampToValueAtTime(80, t + 0.12);
+  g.gain.setValueAtTime(0.0001, t);
+  g.gain.exponentialRampToValueAtTime(0.18, t + 0.01);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+  o.connect(g); g.connect(audioCtx.destination); o.start(t); o.stop(t + 0.3);
 }
 
+// Game over sound: lower sawtooth sweep
 function playGameOverSound() {
-  ensureAudioCtx();
-  if (!audioCtx) return;
+  ensureAudioCtx(); if (!audioCtx) return;
   const t = audioCtx.currentTime;
-  const oscillator = audioCtx.createOscillator();
-  const gainNode = audioCtx.createGain();
-  oscillator.type = 'sawtooth';
-  oscillator.frequency.setValueAtTime(120, t);
-  oscillator.frequency.exponentialRampToValueAtTime(40, t + 0.5);
-  gainNode.gain.setValueAtTime(0.0001, t);
-  gainNode.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
-  gainNode.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
-  oscillator.connect(gainNode);
-  gainNode.connect(audioCtx.destination);
-  oscillator.start(t);
-  oscillator.stop(t + 0.7);
+  const o1 = audioCtx.createOscillator();
+  const g1 = audioCtx.createGain();
+  o1.type = 'sawtooth';
+  o1.frequency.setValueAtTime(120, t);
+  o1.frequency.exponentialRampToValueAtTime(40, t + 0.5);
+  g1.gain.setValueAtTime(0.0001, t);
+  g1.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+  g1.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+  o1.connect(g1); g1.connect(audioCtx.destination); o1.start(t); o1.stop(t + 0.7);
 }
 
+/* ----------------------
+   Visual effects: particles for squish
+   ---------------------- */
 class Particle {
   constructor(x, y) {
-    this.x = x;
-    this.y = y;
+    // small square particles with slight upward velocity and gravity
+    this.x = x; this.y = y;
     this.vx = (Math.random() - 0.5) * 2;
     this.vy = -Math.random() * 2 - 0.5;
     this.life = 30 + Math.random() * 20;
     this.size = 2 + Math.random() * 3;
-    this.color = `hsla(${Math.floor(10 + Math.random() * 40)},70%,40%,1)`;
+    this.color = `hsla(${Math.floor(10 + Math.random() * 40)},70%,40%,1)`; // reddish
   }
-  update() {
-    this.x += this.vx;
-    this.y += this.vy;
-    this.vy += 0.12;
-    this.life--;
-  }
-  draw(ctx) {
-    ctx.save();
-    ctx.globalAlpha = Math.max(0, this.life / 50);
-    ctx.fillStyle = this.color;
-    ctx.fillRect(this.x, this.y, this.size, this.size);
-    ctx.restore();
-  }
+  update() { this.x += this.vx; this.y += this.vy; this.vy += 0.12; this.life--; }
+  draw(ctx) { ctx.save(); ctx.globalAlpha = Math.max(0, this.life / 50); ctx.fillStyle = this.color; ctx.fillRect(this.x, this.y, this.size, this.size); ctx.restore(); }
 }
 
+/* ----------------------
+   Player (Dino) — jump & stomp logic
+   ---------------------- */
 class Dino {
   constructor() {
-    this.x = 60;
-    this.groundY = 150;
-    this.w = 44;
-    this.h = 44;
-    this.y = this.groundY - this.h;
-    this.vy = 0;
-    this.gravity = 0.6;
-    this.jumpPower = -11;
-    this.jumping = false;
-    this.ducking = false;
-    this.step = 0;
-    this.stomping = false;
+    this.x = 60; this.groundY = 150; this.w = 44; this.h = 44; this.y = this.groundY - this.h;
+    this.vy = 0; this.gravity = 0.6; this.jumpPower = -11; this.jumping = false; this.ducking = false; this.step = 0; this.stomping = false;
   }
   jump() {
-    if (!this.jumping && !gameOver) {
-      this.vy = this.jumpPower;
-      this.jumping = true;
-      this.stomping = false;
-    }
+    // only allow jump when grounded and not in game over state
+    if (!this.jumping && !gameOver) { this.vy = this.jumpPower; this.jumping = true; this.stomping = false; }
   }
   stomp() {
+    // stomping is an intentional fast downward move — only allowed while airborne
     if (this.jumping && !this.stomping && !gameOver) {
       this.stomping = true;
-      this.vy = 18;
+      this.vy = 18; // force quick downward velocity to reliably hit cats
       playStompSound();
     }
   }
-  duck(toggle) {
-    this.ducking = !!toggle;
-    this.h = this.ducking ? 26 : 44;
-    if (!this.ducking && this.y > this.groundY - this.h) {
-      this.y = this.groundY - this.h;
-    }
-  }
+  duck(toggle) { this.ducking = !!toggle; this.h = this.ducking ? 26 : 44; if (!this.ducking && this.y > this.groundY - this.h) this.y = this.groundY - this.h; }
   update() {
-    if (gameOver) return;
-    this.vy += this.gravity;
-    this.y += this.vy;
-    if (this.y >= this.groundY - this.h) {
-      this.y = this.groundY - this.h;
-      this.vy = 0;
-      this.jumping = false;
-      this.stomping = false;
-    }
-    this.step = (this.step + 0.15) % 2;
+    if (gameOver) return; // freeze physics on game over
+    this.vy += this.gravity; this.y += this.vy;
+    if (this.y >= this.groundY - this.h) { this.y = this.groundY - this.h; this.vy = 0; this.jumping = false; this.stomping = false; }
+    this.step = (this.step + 0.15) % 2; // leg animation
   }
   draw(ctx) {
     ctx.save();
-    ctx.fillStyle = '#111827';
-    ctx.fillRect(this.x, this.y, this.w, this.h);
-    ctx.fillStyle = '#fff';
-    ctx.fillRect(this.x + Math.floor(this.w * 0.65), this.y + 8, 6, 6);
-    if (this.stomping) {
-      ctx.fillStyle = 'rgba(123,30,30,0.12)';
-      ctx.fillRect(this.x - 6, this.y + this.h - 4, this.w + 12, 8);
-    }
+    ctx.fillStyle = '#111827'; ctx.fillRect(this.x, this.y, this.w, this.h); // body
+    ctx.fillStyle = '#fff'; ctx.fillRect(this.x + Math.floor(this.w * 0.65), this.y + 8, 6, 6); // eye
+    if (this.stomping) { ctx.fillStyle = 'rgba(123,30,30,0.12)'; ctx.fillRect(this.x - 6, this.y + this.h - 4, this.w + 12, 8); }
     ctx.fillStyle = '#0b1220';
-    if (!this.jumping) {
-      const leg = (this.step < 1) ? 5 : 0;
-      ctx.fillRect(this.x + 8, this.y + this.h - 6 + leg, 8, 6);
-      ctx.fillRect(this.x + 26, this.y + this.h - 6 - leg, 8, 6);
-    } else {
-      ctx.fillRect(this.x + 8, this.y + this.h - 6, 8, 6);
-      ctx.fillRect(this.x + 26, this.y + this.h - 6, 8, 6);
-    }
+    if (!this.jumping) { const leg = (this.step < 1) ? 5 : 0; ctx.fillRect(this.x + 8, this.y + this.h - 6 + leg, 8, 6); ctx.fillRect(this.x + 26, this.y + this.h - 6 - leg, 8, 6); }
+    else { ctx.fillRect(this.x + 8, this.y + this.h - 6, 8, 6); ctx.fillRect(this.x + 26, this.y + this.h - 6, 8, 6); }
     ctx.restore();
   }
-  bounds() {
-    return { x: this.x, y: this.y, w: this.w, h: this.h };
-  }
+  bounds() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
 }
+const dino = new Dino();
 
+/* ----------------------
+   Obstacles (Cats) and cloud decorations
+   ---------------------- */
 class Obstacle {
   constructor(type = 0) {
-    this.type = type;
-    this.squashed = false;
+    this.type = type; this.squashed = false;
     this.w = type === 0 ? 22 : (type === 1 ? 36 : 36);
     this.h = type === 0 ? 30 : (type === 1 ? 44 : 28);
-    this.x = (canvas.width / DPR) + 10;
-    this.y = 150 - this.h;
-    this.frame = 0;
-    this.removal = 0;
+    this.x = (canvas.width / DPR) + 10; this.y = 150 - this.h; this.frame = 0; this.removal = 0;
   }
-  update() {
-    if (gameOver) return;
-    this.x -= speed;
-    if (this.type === 2) this.frame = (this.frame + 0.3) % 2;
-    if (this.squashed) this.removal++;
-  }
+  update() { if (gameOver) return; this.x -= speed; if (this.type === 2) this.frame = (this.frame + 0.3) % 2; if (this.squashed) this.removal++; }
   draw(ctx) {
     ctx.save();
-    if (this.squashed) {
-      ctx.fillStyle = '#7b1e1e';
-      ctx.fillRect(this.x - 4, this.y + this.h - 10, this.w + 8, 8);
-    } else {
-      if (this.type === 2) {
-        const yy = this.y - 18;
-        ctx.fillStyle = '#0b1220';
-        ctx.fillRect(this.x, yy, this.w, this.h);
-        if (this.frame < 1) {
-          ctx.fillRect(this.x + 4, yy - 6, 12, 6);
-        } else {
-          ctx.fillRect(this.x + 4, yy + this.h - 4, 12, 6);
-        }
-      } else {
-        ctx.fillStyle = '#0b1220';
-        ctx.fillRect(this.x, this.y + 6, this.w, this.h - 6);
+    if (this.squashed) { ctx.fillStyle = '#7b1e1e'; ctx.fillRect(this.x - 4, this.y + this.h - 10, this.w + 8, 8); }
+    else {
+      if (this.type === 2) { const yy = this.y - 18; ctx.fillStyle = '#0b1220'; ctx.fillRect(this.x, yy, this.w, this.h); if (this.frame < 1) ctx.fillRect(this.x + 4, yy - 6, 12, 6); else ctx.fillRect(this.x + 4, yy + this.h - 4, 12, 6); }
+      else {
+        // Simple cat silhouette: body, head, ears, eyes, tail
+        ctx.fillStyle = '#0b1220'; ctx.fillRect(this.x, this.y + 6, this.w, this.h - 6);
         ctx.fillRect(this.x + Math.floor(this.w * 0.1), this.y - 6, Math.floor(this.w * 0.6), 12);
-        ctx.beginPath();
-        ctx.moveTo(this.x + 4, this.y - 6);
-        ctx.lineTo(this.x + 8, this.y - 16);
-        ctx.lineTo(this.x + 14, this.y - 6);
-        ctx.closePath();
-        ctx.fill();
-        ctx.beginPath();
-        ctx.moveTo(this.x + this.w - 14, this.y - 6);
-        ctx.lineTo(this.x + this.w - 8, this.y - 16);
-        ctx.lineTo(this.x + this.w - 4, this.y - 6);
-        ctx.closePath();
-        ctx.fill();
-        ctx.fillStyle = '#fff';
-        ctx.fillRect(this.x + Math.floor(this.w * 0.25), this.y + 8, 4, 4);
-        ctx.fillRect(this.x + Math.floor(this.w * 0.6), this.y + 8, 4, 4);
-        ctx.fillStyle = '#0b1220';
-        ctx.fillRect(this.x + this.w - 6, this.y + 12, 6, 4);
+        ctx.beginPath(); ctx.moveTo(this.x + 4, this.y - 6); ctx.lineTo(this.x + 8, this.y - 16); ctx.lineTo(this.x + 14, this.y - 6); ctx.closePath(); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(this.x + this.w - 14, this.y - 6); ctx.lineTo(this.x + this.w - 8, this.y - 16); ctx.lineTo(this.x + this.w - 4, this.y - 6); ctx.closePath(); ctx.fill();
+        ctx.fillStyle = '#fff'; ctx.fillRect(this.x + Math.floor(this.w * 0.25), this.y + 8, 4, 4); ctx.fillRect(this.x + Math.floor(this.w * 0.6), this.y + 8, 4, 4);
+        ctx.fillStyle = '#0b1220'; ctx.fillRect(this.x + this.w - 6, this.y + 12, 6, 4);
       }
     }
     ctx.restore();
   }
-  offscreen() {
-    return this.x + this.w < -30 || this.removal > 30;
-  }
-  bounds() {
-    return { x: this.x, y: this.y, w: this.w, h: this.h };
-  }
+  offscreen() { return this.x + this.w < -30 || this.removal > 30; }
+  bounds() { return { x: this.x, y: this.y, w: this.w, h: this.h }; }
 }
 
-class Cloud {
-  constructor() {
-    this.x = canvas.width / DPR + Math.random() * 200;
-    this.y = 20 + Math.random() * 40;
-    this.w = 48 + Math.random() * 60;
-    this.vx = -(speed * 0.35);
-  }
-  update() {
-    if (gameOver) return;
-    this.x += this.vx;
-  }
-  draw(ctx) {
-    ctx.save();
-    ctx.fillStyle = '#e6eef7';
-    ctx.fillRect(this.x, this.y, this.w, 16);
-    ctx.fillRect(this.x - 12, this.y + 4, 28, 10);
-    ctx.restore();
-  }
-}
+class Cloud { constructor() { this.x = canvas.width / DPR + Math.random() * 200; this.y = 20 + Math.random() * 40; this.w = 48 + Math.random() * 60; this.vx = -(speed * 0.35); } update() { if (gameOver) return; this.x += this.vx; } draw(ctx) { ctx.save(); ctx.fillStyle = '#e6eef7'; ctx.fillRect(this.x, this.y, this.w, 16); ctx.fillRect(this.x - 12, this.y + 4, 28, 10); ctx.restore(); } }
 
-const dino = new Dino();
+function spawnObstacle() { const r = Math.random(); let type = r < 0.7 ? 0 : (r < 0.95 ? 1 : 2); obstacles.push(new Obstacle(type)); }
+function spawnCloud() { clouds.push(new Cloud()); }
+function rectsIntersect(a, b) { return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y; }
 
-function spawnObstacle() {
-  const r = Math.random();
-  let type = r < 0.7 ? 0 : (r < 0.95 ? 1 : 2);
-  obstacles.push(new Obstacle(type));
-}
-function spawnCloud() {
-  clouds.push(new Cloud());
-}
-function rectsIntersect(a, b) {
-  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
-}
-
+/* ----------------------
+   Core game loop
+   - Only advances frames while running to allow a frozen frame on Game Over
+   - Draws background (day/night), entities, handles spawns, collisions
+   ---------------------- */
 function resetGame() {
-  running = false;
-  gameOver = false;
-  frames = 0;
-  score = 0;
-  speed = baseSpeed;
-  obstacles = [];
-  clouds = [];
-  particles = [];
-  spawnTimer = 0;
-  dino.y = dino.groundY - dino.h;
-  dino.vy = 0;
-  dino.jumping = false;
-  dino.stomping = false;
-  status.textContent = 'Ready — press Space to start';
-  updateScoreUI();
+  running = false; gameOver = false; frames = 0; score = 0; speed = baseSpeed; obstacles = []; clouds = []; particles = []; spawnTimer = 0;
+  dino.y = dino.groundY - dino.h; dino.vy = 0; dino.jumping = false; dino.stomping = false; status.textContent = 'Ready — press Space to start'; updateScoreUI();
 }
 resetGame();
 
-function updateScoreUI() {
-  scoreBox.textContent = `Squashed: ${score}`;
-}
+function updateScoreUI() { scoreBox.textContent = `Squashed: ${score}`; }
 
+// Day/Night gradient with phase shift so t=0 starts in daylight
 function skyGradient(t) {
-  const p = 40;
-  const phase = -Math.PI / 2;
-  const a = (Math.sin((t / p) * Math.PI * 2 + phase) + 1) / 2;
-  const dayTop = [255, 255, 255];
-  const dayBot = [238, 243, 255];
-  const nightTop = [18, 24, 49];
-  const nightBot = [8, 12, 28];
-  function lerp(c0, c1, a) {
-    return c0.map((v, i) => Math.round(v * (1 - a) + c1[i] * a));
-  }
-  const top = lerp(dayTop, nightTop, a);
-  const bot = lerp(dayBot, nightBot, a);
+  const p = 40; const phase = -Math.PI / 2; // phase shift to begin at day
+  const a = (Math.sin((t / p) * Math.PI * 2 + phase) + 1) / 2; // 0..1 where 0=day,1=night
+  const dayTop = [255, 255, 255]; const dayBot = [238, 243, 255];
+  const nightTop = [18, 24, 49]; const nightBot = [8, 12, 28];
+  function lerp(c0, c1, a) { return c0.map((v, i) => Math.round(v * (1 - a) + c1[i] * a)); }
+  const top = lerp(dayTop, nightTop, a); const bot = lerp(dayBot, nightBot, a);
   return { top: `rgb(${top.join(',')})`, bot: `rgb(${bot.join(',')})`, nightAlpha: a };
 }
 
 function gameLoop() {
+  // advance frames only when the run is active — keeps the world frozen after Game Over
   if (running && !gameOver) frames++;
-  const t = frames / 60;
-  const cw = canvas.width / DPR;
-  const ch = canvas.height / DPR;
+  const t = frames / 60; // approximate seconds (assuming 60fps)
+  const cw = canvas.width / DPR; const ch = canvas.height / DPR;
 
+  // Sky gradient (day <-> night)
   const sky = skyGradient(t);
   const gradient = ctx.createLinearGradient(0, 0, 0, ch);
-  gradient.addColorStop(0, sky.top);
-  gradient.addColorStop(1, sky.bot);
-  ctx.fillStyle = gradient;
-  ctx.fillRect(0, 0, cw, ch);
+  gradient.addColorStop(0, sky.top); gradient.addColorStop(1, sky.bot);
+  ctx.fillStyle = gradient; ctx.fillRect(0, 0, cw, ch);
 
-  const nightAlpha = sky.nightAlpha;
-  const sunX = (cw * 0.8) - Math.sin(t / 6) * 60;
-  const sunY = 36 + Math.cos(t / 6) * 12;
+  // sun & moon positions (alpha blends between them using nightAlpha)
+  const nightAlpha = sky.nightAlpha; const sunX = (cw * 0.8) - Math.sin(t / 6) * 60; const sunY = 36 + Math.cos(t / 6) * 12;
+  ctx.save(); ctx.globalAlpha = 1 - nightAlpha; ctx.beginPath(); ctx.fillStyle = '#ffd166'; ctx.arc(sunX, sunY, 18, 0, Math.PI * 2); ctx.fill(); ctx.restore();
+  ctx.save(); ctx.globalAlpha = nightAlpha; ctx.beginPath(); ctx.fillStyle = '#e6eef7'; ctx.arc(sunX - 10, sunY + 6, 12, 0, Math.PI * 2); ctx.fill(); ctx.restore();
 
-  ctx.save();
-  ctx.globalAlpha = 1 - nightAlpha;
-  ctx.beginPath();
-  ctx.fillStyle = '#ffd166';
-  ctx.arc(sunX, sunY, 18, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  ctx.save();
-  ctx.globalAlpha = nightAlpha;
-  ctx.beginPath();
-  ctx.fillStyle = '#e6eef7';
-  ctx.arc(sunX - 10, sunY + 6, 12, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
+  // spawn clouds occasionally while running
   if (running && !gameOver && frames % 160 === 0) spawnCloud();
+  clouds.forEach((c, i) => { c.draw(ctx); if (!gameOver) c.update(); if (c.x + c.w < -50) clouds.splice(i, 1); });
 
-  clouds.forEach((c, i) => {
-    c.draw(ctx);
-    if (!gameOver) c.update();
-    if (c.x + c.w < -50) clouds.splice(i, 1);
-  });
+  // ground and dashed detail
+  ctx.fillStyle = nightAlpha > 0.5 ? '#0b1220' : '#111827'; ctx.fillRect(0, 150, cw, 4);
+  ctx.fillStyle = nightAlpha > 0.5 ? '#1f2937' : '#cbd5e1'; for (let x = 0; x < cw; x += 12) { ctx.fillRect(x, 154, 6, 2); }
 
-  ctx.fillStyle = nightAlpha > 0.5 ? '#0b1220' : '#111827';
-  ctx.fillRect(0, 150, cw, 4);
-  ctx.fillStyle = nightAlpha > 0.5 ? '#1f2937' : '#cbd5e1';
-  for (let x = 0; x < cw; x += 12) {
-    ctx.fillRect(x, 154, 6, 2);
-  }
-
+  // spawning and gentle speed scaling while running
   if (running && !gameOver) {
     spawnTimer -= 1;
-    if (spawnTimer <= 0) {
-      spawnTimer = 140 + Math.random() * 120 - Math.min(60, Math.floor(score / 3));
-      spawnObstacle();
-    }
+    if (spawnTimer <= 0) { spawnTimer = 140 + Math.random() * 120 - Math.min(60, Math.floor(score / 3)); spawnObstacle(); }
     speed = baseSpeed + Math.floor(score / 10);
   }
 
-  obstacles.forEach((o, i) => {
-    o.draw(ctx);
-    if (!gameOver) o.update();
-    if (o.offscreen()) obstacles.splice(i, 1);
-  });
+  // obstacles (draw then update unless gameOver to freeze them in place)
+  obstacles.forEach((o, i) => { o.draw(ctx); if (!gameOver) o.update(); if (o.offscreen()) obstacles.splice(i, 1); });
 
-  particles.forEach((p, i) => {
-    p.update();
-    p.draw(ctx);
-    if (p.life <= 0) particles.splice(i, 1);
-  });
+  // particles update and draw (allow them to play out even if gameOver)
+  particles.forEach((p, i) => { p.update(); p.draw(ctx); if (p.life <= 0) particles.splice(i, 1); });
 
-  dino.draw(ctx);
-  if (running && !gameOver) dino.update();
+  // draw player and update physics only if running
+  dino.draw(ctx); if (running && !gameOver) dino.update();
 
+  /* Collision detection notes:
+     - We perform a simple AABB intersection test between player and each obstacle.
+     - Successful stomps require the player to have triggered the active stomp flag (dino.stomping).
+     - If stomping, the obstacle is marked squashed, a small bounce is applied, particles & sound are triggered,
+       and score increments by one (score only increases on an active stomp).
+     - If not stomping, the collision is treated as a hit and the run ends (gameOver true) and movement freezes.
+  */
   if (running && !gameOver) {
     for (const o of obstacles) {
-      if (o.squashed) continue;
+      if (o.squashed) continue; // skip already squashed
       if (rectsIntersect(dino.bounds(), o.bounds())) {
         if (dino.stomping) {
-          o.squashed = true;
-            o.removal = 0;
-            dino.vy = -8;
-            dino.stomping = false;
-            score++;
-            updateScoreUI();
-            playStompSound();
-            const px = o.x + o.w / 2;
-            const py = o.y + o.h / 2;
-            for (let n = 0; n < 18; n++) {
-              particles.push(new Particle(px + (Math.random() - 0.5) * 10, py + (Math.random() - 0.5) * 6));
-            }
-            if (!best || score > best.score) {
-              best = { score, when: new Date().toISOString() };
-              localStorage.setItem('forge_dino_best', JSON.stringify(best));
-              updateBestUI();
-            }
+          // successful stomp
+          o.squashed = true; o.removal = 0; dino.vy = -8; dino.stomping = false; score++; updateScoreUI(); playStompSound();
+          // spawn a burst of particles centered on the cat
+          const px = o.x + o.w / 2; const py = o.y + o.h / 2;
+          for (let n = 0; n < 18; n++) particles.push(new Particle(px + (Math.random() - 0.5) * 10, py + (Math.random() - 0.5) * 6));
+          // save best score
+          if (!best || score > best.score) { best = { score, when: new Date().toISOString() }; localStorage.setItem('forge_dino_best', JSON.stringify(best)); updateBestUI(); }
         } else {
-          gameOver = true;
-          running = false;
-          status.textContent = 'Game Over — press Space to restart';
-          playGameOverSound();
-          break;
+          // hit from side: immediate game over and freeze world
+          gameOver = true; running = false; status.textContent = 'Game Over — press Space to restart'; playGameOverSound(); break;
         }
       }
     }
   }
 
+  // show start hint when idle
   if (!running && !gameOver) {
-    ctx.save();
-    ctx.fillStyle = nightAlpha > 0.5 ? '#f3f4f6' : '#111827';
-    ctx.font = '14px Inter,Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Press Space or Tap to start — stomp cats to score (tap while airborne to stomp)', cw / 2, 90);
-    ctx.restore();
+    ctx.save(); ctx.fillStyle = nightAlpha > 0.5 ? '#f3f4f6' : '#111827'; ctx.font = '14px Inter,Arial'; ctx.textAlign = 'center'; ctx.fillText('Press Space or Tap to start — stomp cats to score (tap while airborne to stomp)', cw / 2, 90); ctx.restore();
   }
 
+  // game over overlay — underlying world is frozen because updates stopped
   if (gameOver) {
-    ctx.save();
-    ctx.fillStyle = 'rgba(255,255,255,0.6)';
-    ctx.fillRect(0, 0, cw, ch);
-    ctx.fillStyle = '#111827';
-    ctx.font = '18px Inter,Arial';
-    ctx.textAlign = 'center';
-    ctx.fillText('Game Over', cw / 2, ch / 2 - 10);
-    ctx.font = '14px Inter,Arial';
-    ctx.fillText('Press Space or Tap to restart', cw / 2, ch / 2 + 14);
-    ctx.restore();
+    ctx.save(); ctx.fillStyle = 'rgba(255,255,255,0.6)'; ctx.fillRect(0, 0, cw, ch); ctx.fillStyle = '#111827'; ctx.font = '18px Inter,Arial'; ctx.textAlign = 'center'; ctx.fillText('Game Over', cw / 2, ch / 2 - 10); ctx.font = '14px Inter,Arial'; ctx.fillText('Press Space or Tap to restart', cw / 2, ch / 2 + 14); ctx.restore();
   }
 
   requestAnimationFrame(gameLoop);
 }
 requestAnimationFrame(gameLoop);
 
-function startIfNeeded() {
-  if (!running && !gameOver) {
-    running = true;
-    status.textContent = 'Playing';
-  }
-}
+/* ----------------------
+   Input handling
+   ---------------------- */
+function startIfNeeded() { if (!running && !gameOver) { running = true; status.textContent = 'Playing'; } }
 
 document.addEventListener('keydown', (e) => {
   if (e.code === 'Space' || e.code === 'ArrowUp' || e.key === 'w') {
     e.preventDefault();
-    if (gameOver) {
-      resetGame();
-      startIfNeeded();
-    }
-    startIfNeeded();
-    dino.jump();
+    if (gameOver) { resetGame(); startIfNeeded(); }
+    startIfNeeded(); dino.jump();
   }
   if (e.code === 'ArrowDown' || e.key === 's') {
     e.preventDefault();
-    if (dino.jumping) dino.stomp();
-    else dino.duck(true);
+    if (dino.jumping) dino.stomp(); else dino.duck(true);
   }
 });
-document.addEventListener('keyup', (e) => {
-  if (e.code === 'ArrowDown' || e.key === 's') {
-    if (!dino.jumping) dino.duck(false);
-  }
-});
+document.addEventListener('keyup', (e) => { if (e.code === 'ArrowDown' || e.key === 's') { if (!dino.jumping) dino.duck(false); } });
 
+// pointer/touch controls: tap to jump; tap while airborne to stomp
 canvas.addEventListener('pointerdown', (ev) => {
-  if (gameOver) {
-    resetGame();
-    startIfNeeded();
-  }
-  startIfNeeded();
-  if (dino.jumping) dino.stomp();
-  else dino.jump();
+  if (gameOver) { resetGame(); startIfNeeded(); }
+  startIfNeeded(); if (dino.jumping) dino.stomp(); else dino.jump();
 });
 
+// ensure canvas can receive keyboard focus
 canvas.addEventListener('click', () => canvas.focus());
 
+// spawn a couple of clouds to make initial scene less empty
 for (let i = 0; i < 2; i++) clouds.push(new Cloud());
 
+// expose helpers for debugging/automation
 window.ForgeDino = {
   reset: resetGame,
-  start: () => {
-    running = true;
-    status.textContent = 'Playing';
-  },
+  start: () => { running = true; status.textContent = 'Playing'; },
   getScore: () => score,
 };
+
 </script>
 </body>
 </html>
