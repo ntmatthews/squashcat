@@ -1,0 +1,641 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>SquashCat — Hyperforge Studios (Squash the Cats)</title>
+  <style>
+    :root{ --bg:#f7f7f7; --foreground:#111827; --muted:#6b7280; }
+    html,body{height:100%;}
+    body{margin:0;font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,Arial;background:var(--bg);color:var(--foreground);display:flex;align-items:center;justify-content:center;padding:20px}
+    .frame{width:min(980px,96vw);background:linear-gradient(180deg,rgba(255,255,255,0.7),rgba(255,255,255,0.55));border-radius:12px;box-shadow:0 12px 30px rgba(2,6,23,0.12);padding:18px;display:flex;flex-direction:column;gap:12px}
+    header{display:flex;align-items:center;justify-content:space-between}
+    header h1{font-size:16px;margin:0}
+    header .meta{font-size:12px;color:var(--muted)}
+    .stage{background:linear-gradient(#fff,#f3f4f6);border-radius:8px;padding:10px;display:flex;flex-direction:column;align-items:center}
+    canvas{width:100%;height:auto;border-radius:6px;background:transparent}
+    .hud{display:flex;gap:12px;align-items:center;width:100%;justify-content:space-between}
+    .scorebox{background:rgba(17,24,39,0.04);padding:8px 12px;border-radius:8px;font-weight:700}
+    .footer{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted)}
+    @media (max-width:640px){ .frame{padding:12px} }
+  </style>
+</head>
+<body>
+  <div class="frame" role="application" aria-label="ForgeDino Squash by Hyperforge Studios">
+    <header>
+      <div>
+        <h1>Hyperforge Studios — SquashCat (Squash the Cats)</h1>
+        <div class="meta">Jump & stomp cats.</div>
+      </div>
+      <div class="scorebox" id="bestBox">Best: —</div>
+    </header>
+
+    <div class="stage">
+      <canvas id="game" width="900" height="200" tabindex="0"></canvas>
+      <div class="hud" style="width:100%">
+        <div class="controls">Space to jump · Down or S while airborne to stomp · Tap once to jump, tap while airborne to stomp</div>
+        <div class="scorebox" id="scoreBox">Squashed: 0</div>
+      </div>
+    </div>
+
+    <div class="footer">
+      <div>Made by Hyperforge Studios</div>
+      <div id="status">Ready — press Space to start</div>
+    </div>
+  </div>
+
+<script>
+// ForgeCat — Squash the Cats game code with inline comments for clarity
+
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+
+// Device Pixel Ratio for crisp rendering on high-DPI screens
+let DPR = Math.max(window.devicePixelRatio || 1, 1);
+
+// Resize canvas to match displayed size and DPR
+function resize() {
+  const rect = canvas.getBoundingClientRect();
+  canvas.width = Math.floor(rect.width * DPR);
+  canvas.height = Math.floor(rect.height * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+// Initialize canvas size based on window width with limits
+function initCanvasSize() {
+  const cssWidth = Math.min(900, Math.max(320, window.innerWidth * 0.9));
+  canvas.style.width = cssWidth + 'px';
+  canvas.style.height = '200px';
+  resize();
+}
+initCanvasSize();
+
+// Update canvas size on window resize
+window.addEventListener('resize', () => {
+  DPR = Math.max(window.devicePixelRatio || 1, 1);
+  initCanvasSize();
+});
+
+// Game state variables
+let running = false;     // Is game running
+let gameOver = false;    // Has game ended
+let frames = 0;          // Frame counter
+let score = 0;           // Player's score
+let baseSpeed = 2;       // Base movement speed (slower for easier play)
+let speed = baseSpeed;   // Current game speed, scales with score
+let obstacles = [];      // Array to hold active obstacles (cats)
+let clouds = [];         // Array to hold clouds in the background
+let particles = [];      // Array for particle effects on stomp
+let spawnTimer = 0;      // Timer for spawning obstacles
+
+// Best score stored in localStorage, if any
+let best = JSON.parse(localStorage.getItem('forge_dino_best') || 'null');
+
+// DOM elements for updating UI
+const bestBox = document.getElementById('bestBox');
+const scoreBox = document.getElementById('scoreBox');
+const status = document.getElementById('status');
+
+// Update best score UI
+function updateBestUI() {
+  bestBox.textContent = best ? `Best: ${best.score}` : 'Best: —';
+}
+updateBestUI();
+
+// Audio context for simple sound effects
+let audioCtx = null;
+
+// Initialize AudioContext if not already created
+function ensureAudioCtx() {
+  if (!audioCtx) {
+    try {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    } catch (e) {
+      audioCtx = null;
+    }
+  }
+}
+
+// Play stomp sound effect using Web Audio API
+function playStompSound() {
+  ensureAudioCtx();
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const oscillator = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  oscillator.type = 'sine';
+  oscillator.frequency.setValueAtTime(180, t);
+  oscillator.frequency.exponentialRampToValueAtTime(80, t + 0.12);
+  gainNode.gain.setValueAtTime(0.0001, t);
+  gainNode.gain.exponentialRampToValueAtTime(0.18, t + 0.01);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, t + 0.26);
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  oscillator.start(t);
+  oscillator.stop(t + 0.3);
+}
+
+// Play game over sound effect
+function playGameOverSound() {
+  ensureAudioCtx();
+  if (!audioCtx) return;
+  const t = audioCtx.currentTime;
+  const oscillator = audioCtx.createOscillator();
+  const gainNode = audioCtx.createGain();
+  oscillator.type = 'sawtooth';
+  oscillator.frequency.setValueAtTime(120, t);
+  oscillator.frequency.exponentialRampToValueAtTime(40, t + 0.5);
+  gainNode.gain.setValueAtTime(0.0001, t);
+  gainNode.gain.exponentialRampToValueAtTime(0.12, t + 0.02);
+  gainNode.gain.exponentialRampToValueAtTime(0.0001, t + 0.6);
+  oscillator.connect(gainNode);
+  gainNode.connect(audioCtx.destination);
+  oscillator.start(t);
+  oscillator.stop(t + 0.7);
+}
+
+// Particle class for stomp "squish" effects
+class Particle {
+  constructor(x, y) {
+    this.x = x;                              // Position x
+    this.y = y;                              // Position y
+    this.vx = (Math.random() - 0.5) * 2;    // Horizontal velocity
+    this.vy = -Math.random() * 2 - 0.5;     // Initial upward velocity
+    this.life = 30 + Math.random() * 20;    // Lifespan in frames
+    this.size = 2 + Math.random() * 3;      // Particle size
+    this.color = `hsla(${Math.floor(10 + Math.random() * 40)},70%,40%,1)`; // Reddish color range
+  }
+  update() {
+    this.x += this.vx;
+    this.y += this.vy;
+    this.vy += 0.12;  // Gravity effect
+    this.life--;
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.globalAlpha = Math.max(0, this.life / 50);  // Fade out with life
+    ctx.fillStyle = this.color;
+    ctx.fillRect(this.x, this.y, this.size, this.size);
+    ctx.restore();
+  }
+}
+
+// Dino player class with jump and stomp mechanics
+class Dino {
+  constructor() {
+    this.x = 60;             // Fixed horizontal position
+    this.groundY = 150;      // Ground level y-position
+    this.w = 44;             // Width
+    this.h = 44;             // Height (can duck to 26)
+    this.y = this.groundY - this.h;  // Vertical position
+    this.vy = 0;             // Vertical velocity
+    this.gravity = 0.6;      // Gravity acceleration
+    this.jumpPower = -11;    // Initial jump velocity (upward)
+    this.jumping = false;    // Is in jump
+    this.ducking = false;    // Is ducking (not used for collisions currently)
+    this.step = 0;           // Animation step for legs
+    this.stomping = false;   // Is stomping (falling fast)
+  }
+  jump() {
+    // Start jump if not already jumping and game is active
+    if (!this.jumping && !gameOver) {
+      this.vy = this.jumpPower;
+      this.jumping = true;
+      this.stomping = false;
+    }
+  }
+  stomp() {
+    // Can stomp only if airborne and not already stomping
+    if (this.jumping && !this.stomping && !gameOver) {
+      this.stomping = true;
+      this.vy = 18; // Force fast downward speed to squash cats
+      playStompSound();
+    }
+  }
+  duck(toggle) {
+    // Duck changes height for visuals (not critical for gameplay here)
+    this.ducking = !!toggle;
+    this.h = this.ducking ? 26 : 44;
+    if (!this.ducking && this.y > this.groundY - this.h) {
+      this.y = this.groundY - this.h;
+    }
+  }
+  update() {
+    if (gameOver) return;
+    this.vy += this.gravity;    // Apply gravity
+    this.y += this.vy;          // Update vertical position
+    // If on or below ground, reset states and clamp to ground
+    if (this.y >= this.groundY - this.h) {
+      this.y = this.groundY - this.h;
+      this.vy = 0;
+      this.jumping = false;
+      this.stomping = false;
+    }
+    this.step = (this.step + 0.15) % 2; // Animate legs
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.fillStyle = '#111827';                   // Dino body color
+    ctx.fillRect(this.x, this.y, this.w, this.h);
+    ctx.fillStyle = '#fff';                       // Dino eye color
+    ctx.fillRect(this.x + Math.floor(this.w * 0.65), this.y + 8, 6, 6);
+    if (this.stomping) {
+      // Shadow effect when stomping
+      ctx.fillStyle = 'rgba(123,30,30,0.12)';
+      ctx.fillRect(this.x - 6, this.y + this.h - 4, this.w + 12, 8);
+    }
+    ctx.fillStyle = '#0b1220';                    // Legs color
+    if (!this.jumping) {
+      // Animate legs when on ground
+      const leg = (this.step < 1) ? 5 : 0;
+      ctx.fillRect(this.x + 8, this.y + this.h - 6 + leg, 8, 6);
+      ctx.fillRect(this.x + 26, this.y + this.h - 6 - leg, 8, 6);
+    } else {
+      // Legs steady while jumping
+      ctx.fillRect(this.x + 8, this.y + this.h - 6, 8, 6);
+      ctx.fillRect(this.x + 26, this.y + this.h - 6, 8, 6);
+    }
+    ctx.restore();
+  }
+  bounds() {
+    // Returns bounding box for collision detection
+    return { x: this.x, y: this.y, w: this.w, h: this.h };
+  }
+}
+
+// Obstacle class representing cats
+class Obstacle {
+  constructor(type = 0) {
+    this.type = type;       // Type determines size/animation
+    this.squashed = false;  // Has this cat been stomped
+    // Dimensions based on type (0=small cat, 1=big cat, 2=some animated cat)
+    this.w = type === 0 ? 22 : (type === 1 ? 36 : 36);
+    this.h = type === 0 ? 30 : (type === 1 ? 44 : 28);
+    this.x = (canvas.width / DPR) + 10;   // Spawn offscreen right
+    this.y = 150 - this.h;                 // Ground level adjusted
+    this.frame = 0;                       // Animation frame for type 2
+    this.removal = 0;                     // Counter to remove after squashed
+  }
+  update() {
+    if (gameOver) return;
+    this.x -= speed;   // Move left by current game speed
+    if (this.type === 2) this.frame = (this.frame + 0.3) % 2; // Animate type 2
+    if (this.squashed) this.removal++;   // Increment removal counter if squashed
+  }
+  draw(ctx) {
+    ctx.save();
+    if (this.squashed) {
+      // Draw squashed cat shadow effect
+      ctx.fillStyle = '#7b1e1e';
+      ctx.fillRect(this.x - 4, this.y + this.h - 10, this.w + 8, 8);
+    } else {
+      if (this.type === 2) {
+        // Draw animated type 2 cat
+        const yy = this.y - 18;
+        ctx.fillStyle = '#0b1220';
+        ctx.fillRect(this.x, yy, this.w, this.h);
+        if (this.frame < 1) {
+          ctx.fillRect(this.x + 4, yy - 6, 12, 6);
+        } else {
+          ctx.fillRect(this.x + 4, yy + this.h - 4, 12, 6);
+        }
+      } else {
+        // Draw cat body, ears, eyes, and tail for types 0 and 1
+        ctx.fillStyle = '#0b1220';
+        ctx.fillRect(this.x, this.y + 6, this.w, this.h - 6);
+        ctx.fillRect(this.x + Math.floor(this.w * 0.1), this.y - 6, Math.floor(this.w * 0.6), 12);
+        // Ears
+        ctx.beginPath();
+        ctx.moveTo(this.x + 4, this.y - 6);
+        ctx.lineTo(this.x + 8, this.y - 16);
+        ctx.lineTo(this.x + 14, this.y - 6);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(this.x + this.w - 14, this.y - 6);
+        ctx.lineTo(this.x + this.w - 8, this.y - 16);
+        ctx.lineTo(this.x + this.w - 4, this.y - 6);
+        ctx.closePath();
+        ctx.fill();
+        // Eyes and tail
+        ctx.fillStyle = '#fff';
+        ctx.fillRect(this.x + Math.floor(this.w * 0.25), this.y + 8, 4, 4);
+        ctx.fillRect(this.x + Math.floor(this.w * 0.6), this.y + 8, 4, 4);
+        ctx.fillStyle = '#0b1220';
+        ctx.fillRect(this.x + this.w - 6, this.y + 12, 6, 4);
+      }
+    }
+    ctx.restore();
+  }
+  offscreen() {
+    // Returns true if obstacle moved off left side or removal timer elapsed
+    return this.x + this.w < -30 || this.removal > 30;
+  }
+  bounds() {
+    // Returns bounding box for collision detection
+    return { x: this.x, y: this.y, w: this.w, h: this.h };
+  }
+}
+
+// Cloud class for background decoration moving slower than obstacles
+class Cloud {
+  constructor() {
+    this.x = canvas.width / DPR + Math.random() * 200; // Start off right edge
+    this.y = 20 + Math.random() * 40;                   // Random vertical position
+    this.w = 48 + Math.random() * 60;                   // Width variable
+    this.vx = -(speed * 0.35);                          // Horizontal speed slower than obstacles
+  }
+  update() {
+    if (gameOver) return;
+    this.x += this.vx; // Move left
+  }
+  draw(ctx) {
+    ctx.save();
+    ctx.fillStyle = '#e6eef7';               // Light cloud color
+    ctx.fillRect(this.x, this.y, this.w, 16);
+    ctx.fillRect(this.x - 12, this.y + 4, 28, 10);
+    ctx.restore();
+  }
+}
+
+// Create dino player instance
+const dino = new Dino();
+
+// Spawn a new obstacle with weighted random type
+function spawnObstacle() {
+  const r = Math.random();
+  let type = r < 0.7 ? 0 : (r < 0.95 ? 1 : 2);
+  obstacles.push(new Obstacle(type));
+}
+
+// Spawn a new cloud for background
+function spawnCloud() {
+  clouds.push(new Cloud());
+}
+
+// Check if two rectangles intersect (used for collision detection)
+function rectsIntersect(a, b) {
+  return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+}
+
+// Reset game to initial state
+function resetGame() {
+  running = false;
+  gameOver = false;
+  frames = 0;
+  score = 0;
+  speed = baseSpeed;
+  obstacles = [];
+  clouds = [];
+  particles = [];
+  spawnTimer = 0;
+  dino.y = dino.groundY - dino.h;
+  dino.vy = 0;
+  dino.jumping = false;
+  dino.stomping = false;
+  status.textContent = 'Ready — press Space to start';
+  updateScoreUI();
+}
+resetGame();
+
+// Update score display
+function updateScoreUI() {
+  scoreBox.textContent = `Squashed: ${score}`;
+}
+
+// Calculate sky colors for day/night cycle using sine wave
+function skyGradient(t) {
+  const p = 40; // Period length in seconds
+  const phase = -Math.PI / 2; // Phase shift to start at day
+  const a = (Math.sin((t / p) * Math.PI * 2 + phase) + 1) / 2; // 0=day,1=night
+
+  // Color definitions for top and bottom of sky during day and night
+  const dayTop = [255, 255, 255];
+  const dayBot = [238, 243, 255];
+  const nightTop = [18, 24, 49];
+  const nightBot = [8, 12, 28];
+
+  // Linear interpolation helper for color blending
+  function lerp(c0, c1, a) {
+    return c0.map((v, i) => Math.round(v * (1 - a) + c1[i] * a));
+  }
+
+  // Blend top and bottom colors based on current time
+  const top = lerp(dayTop, nightTop, a);
+  const bot = lerp(dayBot, nightBot, a);
+  return { top: `rgb(${top.join(',')})`, bot: `rgb(${bot.join(',')})`, nightAlpha: a };
+}
+
+// Main game loop, called every animation frame
+function gameLoop() {
+  if (running && !gameOver) frames++; // Only advance frames if running and not over
+  const t = frames / 60;               // Time in seconds assuming 60fps
+  const cw = canvas.width / DPR;       // Canvas width in CSS pixels
+  const ch = canvas.height / DPR;      // Canvas height in CSS pixels
+
+  // Draw background gradient sky based on day/night cycle
+  const sky = skyGradient(t);
+  const gradient = ctx.createLinearGradient(0, 0, 0, ch);
+  gradient.addColorStop(0, sky.top);
+  gradient.addColorStop(1, sky.bot);
+  ctx.fillStyle = gradient;
+  ctx.fillRect(0, 0, cw, ch);
+
+  // Draw sun and moon with fading alpha between day/night
+  const nightAlpha = sky.nightAlpha;
+  const sunX = (cw * 0.8) - Math.sin(t / 6) * 60;
+  const sunY = 36 + Math.cos(t / 6) * 12;
+
+  // Sun (visible during day)
+  ctx.save();
+  ctx.globalAlpha = 1 - nightAlpha;
+  ctx.beginPath();
+  ctx.fillStyle = '#ffd166';
+  ctx.arc(sunX, sunY, 18, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Moon (visible during night)
+  ctx.save();
+  ctx.globalAlpha = nightAlpha;
+  ctx.beginPath();
+  ctx.fillStyle = '#e6eef7';
+  ctx.arc(sunX - 10, sunY + 6, 12, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Spawn clouds periodically when running
+  if (running && !gameOver && frames % 160 === 0) spawnCloud();
+
+  // Update and draw clouds, remove if offscreen
+  clouds.forEach((c, i) => {
+    c.draw(ctx);
+    if (!gameOver) c.update();
+    if (c.x + c.w < -50) clouds.splice(i, 1);
+  });
+
+  // Draw ground with alternating colors for texture, adjusts for day/night
+  ctx.fillStyle = nightAlpha > 0.5 ? '#0b1220' : '#111827';
+  ctx.fillRect(0, 150, cw, 4);
+  ctx.fillStyle = nightAlpha > 0.5 ? '#1f2937' : '#cbd5e1';
+  for (let x = 0; x < cw; x += 12) {
+    ctx.fillRect(x, 154, 6, 2);
+  }
+
+  // Spawn obstacles periodically and speed up gradually
+  if (running && !gameOver) {
+    spawnTimer -= 1;
+    if (spawnTimer <= 0) {
+      spawnTimer = 140 + Math.random() * 120 - Math.min(60, Math.floor(score / 3));
+      spawnObstacle();
+    }
+    speed = baseSpeed + Math.floor(score / 10);
+  }
+
+  // Draw and update obstacles, remove if offscreen or squashed long enough
+  obstacles.forEach((o, i) => {
+    o.draw(ctx);
+    if (!gameOver) o.update();
+    if (o.offscreen()) obstacles.splice(i, 1);
+  });
+
+  // Update and draw particles, remove dead ones
+  particles.forEach((p, i) => {
+    p.update();
+    p.draw(ctx);
+    if (p.life <= 0) particles.splice(i, 1);
+  });
+
+  // Draw and update dino player
+  dino.draw(ctx);
+  if (running && !gameOver) dino.update();
+
+  // Collision detection between dino and obstacles
+  if (running && !gameOver) {
+    for (const o of obstacles) {
+      if (o.squashed) continue; // Ignore already squashed cats
+      if (rectsIntersect(dino.bounds(), o.bounds())) {
+        if (dino.stomping) {
+          // Successful stomp: mark cat squashed, bounce dino up, increase score
+          o.squashed = true;
+          o.removal = 0;
+          dino.vy = -8;
+          dino.stomping = false;
+          score++;
+          updateScoreUI();
+          playStompSound();
+
+          // Spawn particles on stomp
+          const px = o.x + o.w / 2;
+          const py = o.y + o.h / 2;
+          for (let n = 0; n < 18; n++) {
+            particles.push(new Particle(px + (Math.random() - 0.5) * 10, py + (Math.random() - 0.5) * 6));
+          }
+
+          // Save best score if beaten
+          if (!best || score > best.score) {
+            best = { score, when: new Date().toISOString() };
+            localStorage.setItem('forge_dino_best', JSON.stringify(best));
+            updateBestUI();
+          }
+        } else {
+          // Collision without stomp causes game over
+          gameOver = true;
+          running = false;
+          status.textContent = 'Game Over — press Space to restart';
+          playGameOverSound();
+          break;
+        }
+      }
+    }
+  }
+
+  // Show start instructions when not running and not game over
+  if (!running && !gameOver) {
+    ctx.save();
+    ctx.fillStyle = nightAlpha > 0.5 ? '#f3f4f6' : '#111827';
+    ctx.font = '14px Inter,Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Press Space or Tap to start — stomp cats to score (tap while airborne to stomp)', cw / 2, 90);
+    ctx.restore();
+  }
+
+  // Overlay for game over state (world frozen underneath)
+  if (gameOver) {
+    ctx.save();
+    ctx.fillStyle = 'rgba(255,255,255,0.6)';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = '#111827';
+    ctx.font = '18px Inter,Arial';
+    ctx.textAlign = 'center';
+    ctx.fillText('Game Over', cw / 2, ch / 2 - 10);
+    ctx.font = '14px Inter,Arial';
+    ctx.fillText('Press Space or Tap to restart', cw / 2, ch / 2 + 14);
+    ctx.restore();
+  }
+
+  requestAnimationFrame(gameLoop);
+}
+requestAnimationFrame(gameLoop);
+
+// Start game if not already running or game over
+function startIfNeeded() {
+  if (!running && !gameOver) {
+    running = true;
+    status.textContent = 'Playing';
+  }
+}
+
+// Keyboard controls for jump and stomp/duck
+document.addEventListener('keydown', (e) => {
+  if (e.code === 'Space' || e.code === 'ArrowUp' || e.key === 'w') {
+    e.preventDefault();
+    if (gameOver) {
+      resetGame();
+      startIfNeeded();
+    }
+    startIfNeeded();
+    dino.jump();
+  }
+  if (e.code === 'ArrowDown' || e.key === 's') {
+    e.preventDefault();
+    if (dino.jumping) dino.stomp();
+    else dino.duck(true);
+  }
+});
+document.addEventListener('keyup', (e) => {
+  if (e.code === 'ArrowDown' || e.key === 's') {
+    if (!dino.jumping) dino.duck(false);
+  }
+});
+
+// Touch / pointer controls: tap to jump, tap while airborne to stomp
+canvas.addEventListener('pointerdown', (ev) => {
+  if (gameOver) {
+    resetGame();
+    startIfNeeded();
+  }
+  startIfNeeded();
+  if (dino.jumping) dino.stomp();
+  else dino.jump();
+});
+
+// Clicking canvas focuses it for keyboard input
+canvas.addEventListener('click', () => canvas.focus());
+
+// Spawn initial clouds for background
+for (let i = 0; i < 2; i++) clouds.push(new Cloud());
+
+// Expose control methods on window for debugging or external control
+window.ForgeDino = {
+  reset: resetGame,
+  start: () => {
+    running = true;
+    status.textContent = 'Playing';
+  },
+  getScore: () => score,
+};
+
+</script>
+</body>
+</html>
